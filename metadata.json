@@ -1,0 +1,6 @@
+{
+  "name": "التحكم والمراقبة",
+  "description": "تطبيق المراقبة والتحكم عن بعد - لوحة المشرف وخدمة العميل",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
