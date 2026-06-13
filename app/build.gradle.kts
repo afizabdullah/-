@@ -22,18 +22,28 @@ android {
   }
 
   signingConfigs {
-    create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+    val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
+    val keystoreExists = file(keystorePath).exists()
+    
+    if (keystoreExists) {
+      create("release") {
+        storeFile = file(keystorePath)
+        storePassword = System.getenv("STORE_PASSWORD")
+        keyAlias = "upload"
+        keyPassword = System.getenv("KEY_PASSWORD")
+      }
     }
-    create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
+    
+    val debugKeystorePath = "${rootDir}/debug.keystore"
+    val debugKeystoreExists = file(debugKeystorePath).exists()
+    
+    if (debugKeystoreExists) {
+      create("debugConfig") {
+        storeFile = file(debugKeystorePath)
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+      }
     }
   }
 
@@ -42,10 +52,18 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      
+      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
+      if (file(keystorePath).exists() && signingConfigs.findByName("release") != null) {
+        signingConfig = signingConfigs.getByName("release")
+      } else if (signingConfigs.findByName("debugConfig") != null) {
+        signingConfig = signingConfigs.getByName("debugConfig")
+      }
     }
     debug {
-      signingConfig = signingConfigs.getByName("debugConfig")
+      if (signingConfigs.findByName("debugConfig") != null) {
+        signingConfig = signingConfigs.getByName("debugConfig")
+      }
     }
   }
   compileOptions {
@@ -57,6 +75,11 @@ android {
     buildConfig = true
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
+}
+
+ksp {
+  // Safe Room schema configuration to prevent compilation/warning issues on build servers
+  arg("room.schemaLocation", "${projectDir}/schemas")
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
