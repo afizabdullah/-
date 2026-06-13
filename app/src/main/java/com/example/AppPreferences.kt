@@ -40,4 +40,28 @@ object AppPreferences {
     fun clearSavedRole(context: Context) {
         getSharedPrefs(context).edit().remove(KEY_SELECTED_ROLE).apply()
     }
+
+    fun getFcmServerKey(context: Context): String {
+        return getSharedPrefs(context).getString("fcm_server_key", "") ?: ""
+    }
+
+    fun saveFcmServerKey(context: Context, key: String) {
+        getSharedPrefs(context).edit().putString("fcm_server_key", key).apply()
+    }
+
+    fun getFcmProjectId(context: Context): String {
+        return getSharedPrefs(context).getString("fcm_project_id", "") ?: ""
+    }
+
+    fun saveFcmProjectId(context: Context, projectId: String) {
+        getSharedPrefs(context).edit().putString("fcm_project_id", projectId).apply()
+    }
+
+    fun getFcmUseLegacy(context: Context): Boolean {
+        return getSharedPrefs(context).getBoolean("fcm_use_legacy", true)
+    }
+
+    fun saveFcmUseLegacy(context: Context, useLegacy: Boolean) {
+        getSharedPrefs(context).edit().putBoolean("fcm_use_legacy", useLegacy).apply()
+    }
 }

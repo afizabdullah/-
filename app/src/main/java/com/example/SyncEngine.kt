@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
+import okhttp3.MediaType.Companion.toMediaType
 
 // Data models as requested by the user
 data class DeviceModel(
@@ -73,8 +74,16 @@ data class ChatMessageModel(
     val timestamp: Long = 0
 )
 
+data class ScreenshotConsentInfo(
+    val deviceId: String,
+    val commandId: String,
+    val commandText: String
+)
+
 object SyncEngine {
     private const val TAG = "SyncEngine"
+
+    val screenshotConsentRequest = MutableStateFlow<ScreenshotConsentInfo?>(null)
 
     // Local in-memory high-fidelity states to power dual emulation
     private val _devices = MutableStateFlow<List<DeviceModel>>(emptyList())
@@ -101,6 +110,10 @@ object SyncEngine {
     // Shared Flow to propagate errors / failures to the user interface
     private val _syncErrors = MutableSharedFlow<String>(extraBufferCapacity = 15)
     val syncErrors = _syncErrors.asSharedFlow()
+
+    // Real-time list of tokens stored in Firebase Realtime Database
+    private val _rtdbTokens = MutableStateFlow<List<Map<String, Any>>>(emptyList())
+    val rtdbTokens: StateFlow<List<Map<String, Any>>> = _rtdbTokens.asStateFlow()
 
     fun triggerError(msg: String) {
         _syncErrors.tryEmit(msg)
@@ -143,6 +156,7 @@ object SyncEngine {
             if (apps.isNotEmpty()) {
                 isFirebaseActive = true
                 listenToFirebaseStores()
+                listenToRealtimeDatabaseTokens()
             } else {
                 Log.i(TAG, "Running in Simulation Sync Mode [No Firebase default app found]")
             }
@@ -190,6 +204,79 @@ object SyncEngine {
     }
 
     /**
+     * Listens to FCM tokens stored in Firebase Realtime Database and updates the state flow
+     */
+    fun listenToRealtimeDatabaseTokens() {
+        if (!isFirebaseActive) return
+        try {
+            val database = com.google.firebase.database.FirebaseDatabase.getInstance()
+            val ref = database.getReference("fcm_tokens")
+            ref.addValueEventListener(object : com.google.firebase.database.ValueEventListener {
+                override fun onDataChange(snapshot: com.google.firebase.database.DataSnapshot) {
+                    val list = mutableListOf<Map<String, Any>>()
+                    for (child in snapshot.children) {
+                        val deviceId = child.child("deviceId").getValue(String::class.java) ?: child.key ?: ""
+                        val deviceName = child.child("deviceName").getValue(String::class.java) ?: "Unknown Device"
+                        val fcmToken = child.child("fcmToken").getValue(String::class.java) ?: ""
+                        val lastSeen = child.child("lastSeen").getValue(Long::class.java) ?: 0L
+                        
+                        val map = mapOf(
+                            "deviceId" to deviceId,
+                            "deviceName" to deviceName,
+                            "fcmToken" to fcmToken,
+                            "lastSeen" to lastSeen
+                        )
+                        list.add(map)
+                    }
+                    _rtdbTokens.value = list
+                    Log.d(TAG, "Successfully loaded RTDB tokens: ${list.size}")
+                }
+
+                override fun onCancelled(error: com.google.firebase.database.DatabaseError) {
+                    Log.e(TAG, "Cancelled or failed to read RTDB tokens: ${error.message}")
+                    triggerError("فشل قراءة Tokens من Realtime Database: ${error.message}")
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initiating RTDB listener: ${e.localizedMessage}")
+        }
+    }
+
+    /**
+     * Uploads the FCM token to Firebase Realtime Database
+     */
+    fun uploadTokenToRealtimeDatabase(context: Context, token: String) {
+        val deviceId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: "unknown_device"
+        val model = Build.MODEL ?: "Android device"
+        
+        try {
+            if (isFirebaseActive) {
+                val database = com.google.firebase.database.FirebaseDatabase.getInstance()
+                val ref = database.getReference("fcm_tokens").child(deviceId)
+                
+                val data = hashMapOf(
+                    "deviceId" to deviceId,
+                    "deviceName" to model,
+                    "fcmToken" to token,
+                    "lastSeen" to System.currentTimeMillis()
+                )
+                
+                ref.setValue(data)
+                    .addOnSuccessListener {
+                        Log.i(TAG, "Successfully uploaded token to Realtime Database")
+                    }
+                    .addOnFailureListener { e ->
+                        Log.e(TAG, "Failed to upload token to Realtime Database: ${e.localizedMessage}")
+                    }
+            } else {
+                Log.i(TAG, "Firebase not active: Token not uploaded to Realtime Database [Simulation Mode]")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Realtime Database is not initialized or configured: ${e.localizedMessage}")
+        }
+    }
+
+    /**
      * Registers a device (used by User Agent)
      */
     fun registerDevice(context: Context, token: String) {
@@ -226,6 +313,9 @@ object SyncEngine {
                         .addOnFailureListener { e ->
                             triggerError("فشل تحديث بيانات العميل في Firestore: ${e.localizedMessage}")
                         }
+                    
+                    // Automatically trigger Realtime Database upload
+                    uploadTokenToRealtimeDatabase(context, token)
                 } catch (e: Exception) {
                     Log.e(TAG, "Firebase Registration Failure: ${e.localizedMessage}")
                     triggerError("فشل تحديث بيانات العميل في Firestore: ${e.localizedMessage}")
@@ -276,6 +366,24 @@ object SyncEngine {
                             triggerError("فشل إرسال الأمر إلى Firestore: ${e.localizedMessage}")
                         }
 
+                    // Push to Realtime Database as well
+                    try {
+                        val rtdb = com.google.firebase.database.FirebaseDatabase.getInstance()
+                        val rtdbRef = rtdb.getReference("device_commands").child(deviceId).child(commandId)
+                        val rtdbData = hashMapOf(
+                            "command" to commandText,
+                            "timestamp" to System.currentTimeMillis(),
+                            "status" to "pending",
+                            "commandId" to commandId
+                        )
+                        rtdbRef.setValue(rtdbData)
+                            .addOnFailureListener { e ->
+                                Log.e("SyncEngine", "Failed to write command to Realtime Database: ${e.localizedMessage}")
+                            }
+                    } catch (e: Exception) {
+                        Log.e("SyncEngine", "Realtime Database command submit error: ${e.localizedMessage}")
+                    }
+
                     // Directly update the parent device document's fields in Firestore
                     val deviceUpdate = hashMapOf<String, Any>(
                         "lastCommand" to commandText,
@@ -306,29 +414,17 @@ object SyncEngine {
      * Simulates the Execution of commands by a Client Agent, creating real data records, files, or responses
      */
     private fun executeSimulatedClientCommand(deviceId: String, cmd: CommandModel) {
+        if (cmd.command == "لقطة شاشة") {
+            updateCommandStatus(deviceId, cmd.commandId, "في انتظار موافقة العميل")
+            screenshotConsentRequest.value = ScreenshotConsentInfo(deviceId, cmd.commandId, cmd.command)
+            return
+        }
+
         // Mark Command as Executing
         updateCommandStatus(deviceId, cmd.commandId, "executing")
 
         // Action Logic based on commands: Screenshot, Camera, Mic, Screen Lock, Location
         when (cmd.command) {
-            "لقطة شاشة" -> {
-                // Mimic screenshot capture
-                val timestamp = System.currentTimeMillis()
-                val item = ScreenshotModel(
-                    id = UUID.randomUUID().toString(),
-                    url = "https://picsum.photos/800/1600?random=$timestamp", // Placeholder url
-                    timestamp = timestamp,
-                    isLocal = false
-                )
-                val items = _screenshots.value[deviceId]?.toMutableList() ?: mutableListOf()
-                items.add(0, item) // Add latest at top
-                _screenshots.value = _screenshots.value + (deviceId to items)
-
-                // Push to Firestore if active
-                if (isFirebaseActive) {
-                    firebaseSaveScreenshot(deviceId, item)
-                }
-            }
             "تشغيل الكاميرا" -> {
                 val timestamp = System.currentTimeMillis()
                 val item = CameraSnipModel(
@@ -381,6 +477,38 @@ object SyncEngine {
 
         // Mark Command as Executed
         updateCommandStatus(deviceId, cmd.commandId, "executed")
+    }
+
+    fun updateCommandStatusPublic(deviceId: String, commandId: String, status: String) {
+        updateCommandStatus(deviceId, commandId, status)
+    }
+
+    fun handleScreenshotConsent(deviceId: String, commandId: String, approved: Boolean) {
+        screenshotConsentRequest.value = null
+        if (approved) {
+            // Generate simulated screenshot
+            val timestamp = System.currentTimeMillis()
+            val item = ScreenshotModel(
+                id = UUID.randomUUID().toString(),
+                url = "https://picsum.photos/800/1600?random=$timestamp", // Placeholder url
+                timestamp = timestamp,
+                isLocal = false
+            )
+            val items = _screenshots.value[deviceId]?.toMutableList() ?: mutableListOf()
+            items.add(0, item) // Add latest at top
+            _screenshots.value = _screenshots.value + (deviceId to items)
+
+            // Push to Firestore if active
+            if (isFirebaseActive) {
+                firebaseSaveScreenshot(deviceId, item)
+            }
+            
+            // Mark Command as Executed
+            updateCommandStatus(deviceId, commandId, "executed")
+        } else {
+            // Refused
+            updateCommandStatus(deviceId, commandId, "الملغي من قبل العميل")
+        }
     }
 
     private fun updateCommandStatus(deviceId: String, commandId: String, status: String) {
@@ -690,5 +818,86 @@ object SyncEngine {
         _recordings.value = _recordings.value + (deviceId to emptyList())
         _commands.value = _commands.value + (deviceId to emptyList())
         _chatMessages.value = _chatMessages.value + (deviceId to emptyList())
+    }
+
+    /**
+     * Sends a push notification to a specific token using OkHttp
+     */
+    fun sendFcmPushNotification(
+        token: String,
+        title: String,
+        body: String,
+        serverKey: String,
+        projectId: String = "",
+        useLegacyApi: Boolean = true,
+        onResult: (Boolean, String) -> Unit
+    ) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val client = okhttp3.OkHttpClient()
+                val mediaType = "application/json; charset=utf-8".toMediaType()
+                
+                val url: String
+                val requestBodyText: String
+                val headers = mutableMapOf<String, String>()
+                
+                if (useLegacyApi) {
+                    // Legacy FCM API
+                    url = "https://fcm.googleapis.com/fcm/send"
+                    headers["Authorization"] = "key=$serverKey"
+                    
+                    val payload = org.json.JSONObject().apply {
+                        put("to", token)
+                        put("notification", org.json.JSONObject().apply {
+                            put("title", title)
+                            put("body", body)
+                            put("sound", "default")
+                        })
+                        put("data", org.json.JSONObject().apply {
+                            put("click_action", "FLUTTER_NOTIFICATION_CLICK") // compatibility
+                            put("command", "notify")
+                        })
+                    }
+                    requestBodyText = payload.toString()
+                } else {
+                    // FCM HTTP v1 API
+                    url = "https://fcm.googleapis.com/v1/projects/$projectId/messages:send"
+                    headers["Authorization"] = "Bearer $serverKey"
+                    
+                    val payload = org.json.JSONObject().apply {
+                        put("message", org.json.JSONObject().apply {
+                            put("token", token)
+                            put("notification", org.json.JSONObject().apply {
+                                put("title", title)
+                                put("body", body)
+                            })
+                        })
+                    }
+                    requestBodyText = payload.toString()
+                }
+                
+                val requestBody = okhttp3.RequestBody.create(mediaType, requestBodyText)
+                val requestBuilder = okhttp3.Request.Builder()
+                    .url(url)
+                    .post(requestBody)
+                
+                headers.forEach { (name, value) ->
+                    requestBuilder.addHeader(name, value)
+                }
+                
+                val request = requestBuilder.build()
+                client.newCall(request).execute().use { response ->
+                    val responseBody = response.body?.string() ?: ""
+                    if (response.isSuccessful) {
+                        onResult(true, "تم الإرسال بنجاح: $responseBody")
+                    } else {
+                        onResult(false, "فشل الإرسال (رمز ${response.code}): $responseBody")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error sending FCM notification: ${e.localizedMessage}")
+                onResult(false, "حدث خطأ أثناء الاتصال بالخادم: ${e.localizedMessage}")
+            }
+        }
     }
 }

