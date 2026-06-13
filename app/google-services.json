@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "566464754412",
+    "project_id": "control-and-monitoring-9736f",
+    "storage_bucket": "control-and-monitoring-9736f.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:566464754412:android:e4ff4b0def7b9a504aabc9",
+        "android_client_info": {
+          "package_name": "com.aistudio.remotectl.ndvxpw"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB9-9cYKNstKXDvmHcEzmcPLa0oAgRFZn0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

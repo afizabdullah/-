@@ -14,6 +14,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -31,6 +32,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -89,12 +92,32 @@ class MainActivity : ComponentActivity() {
         setContent {
             MyApplicationTheme {
                 val navController = rememberNavController()
-                var currentRole by remember { mutableStateOf<String?>(null) } // "admin" or "user" or null
+                val context = LocalContext.current
+                
+                // جلب الدور المثبت والمسجل حالياً للجهاز أو وضع البناء المخصص
+                val savedRole = remember(context) { AppPreferences.getSavedRole(context) }
+                var currentRole by remember { mutableStateOf<String?>(savedRole) }
+                
+                val startDestination = remember(savedRole) {
+                    when (savedRole) {
+                        "admin" -> "admin_login"
+                        "user" -> "user_agent"
+                        else -> "launcher_gate"
+                    }
+                }
+
+                // Collect Firestore/sync errors and toasts them to the admin/user immediately
+                LaunchedEffect(Unit) {
+                    SyncEngine.syncErrors.collect { errorMsg ->
+                        Toast.makeText(context, errorMsg, Toast.LENGTH_LONG).show()
+                    }
+                }
 
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
                     bottomBar = {
-                        if (currentRole != null) {
+                        // لا نظهر شريط التنقل السفلي إلا في وضع التطبيق المزدوج للمحاكاة DUAL وعند عدم تثبيت الدور بشكل دائم
+                        if (AppConfig.BUILD_ROLE == AppConfig.ROLE_DUAL && AppPreferences.getSavedRole(context) == null && currentRole != null) {
                             NavigationBar(
                                 containerColor = MaterialTheme.colorScheme.surfaceVariant,
                                 tonalElevation = 8.dp
@@ -130,16 +153,26 @@ class MainActivity : ComponentActivity() {
                     }
                 ) { innerPadding ->
                     Box(modifier = Modifier.padding(innerPadding)) {
-                        NavHost(navController = navController, startDestination = "launcher_gate") {
+                        NavHost(navController = navController, startDestination = startDestination) {
                             composable("launcher_gate") {
                                 LauncherGateScreen(
-                                    onSelectAdmin = {
+                                    onSelectAdmin = { permanent ->
+                                        if (permanent) {
+                                            AppPreferences.saveSavedRole(context, "admin")
+                                        }
                                         currentRole = "admin"
-                                        navController.navigate("admin_login")
+                                        navController.navigate("admin_login") {
+                                            popUpTo("launcher_gate") { inclusive = true }
+                                        }
                                     },
-                                    onSelectUser = {
+                                    onSelectUser = { permanent ->
+                                        if (permanent) {
+                                            AppPreferences.saveSavedRole(context, "user")
+                                        }
                                         currentRole = "user"
-                                        navController.navigate("user_agent")
+                                        navController.navigate("user_agent") {
+                                            popUpTo("launcher_gate") { inclusive = true }
+                                        }
                                     }
                                 )
                             }
@@ -200,7 +233,76 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun LauncherGateScreen(onSelectAdmin: () -> Unit, onSelectUser: () -> Unit) {
+fun LauncherGateScreen(onSelectAdmin: (Boolean) -> Unit, onSelectUser: (Boolean) -> Unit) {
+    var showAdminDialog by remember { mutableStateOf(false) }
+    var showUserDialog by remember { mutableStateOf(false) }
+
+    if (showAdminDialog) {
+        AlertDialog(
+            onDismissRequest = { showAdminDialog = false },
+            title = { Text("تأكيد دور لوحة تحكم المشرف", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "تريد فتح بوابة المشرف. يرجى تحديد ما إذا كنت تريد تثبيت هذا الهاتف كلوحة تحكم دائم (كنسخة APK منفصلة للمشرف) أو مجرد تشغيل مؤقت للمحاكاة متبادلة الأطراف:",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showAdminDialog = false
+                        onSelectAdmin(true) // permanent lock
+                    }
+                ) {
+                    Text("تثبيت دائم كـ مشرف")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showAdminDialog = false
+                        onSelectAdmin(false) // session only
+                    }
+                ) {
+                    Text("تشغيل مؤقت للمحاكاة")
+                }
+            }
+        )
+    }
+
+    if (showUserDialog) {
+        AlertDialog(
+            onDismissRequest = { showUserDialog = false },
+            title = { Text("تأكيد دور جهاز العميل", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "تريد فتح تطبيق العميل الخاضع للتتبع. يرجى اختيار ما إذا كنت ترغب في تثبيته بشكل دائم على هذا الهاتف (كحزمة منفصلة للعميل) أو كنسخة تجريبية مؤقتة:",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showUserDialog = false
+                        onSelectUser(true) // permanent lock
+                    }
+                ) {
+                    Text("تثبيت دائم كـ عميل")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showUserDialog = false
+                        onSelectUser(false) // session only
+                    }
+                ) {
+                    Text("تشغيل مؤقت للمحاكاة")
+                }
+            }
+        )
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -246,7 +348,7 @@ fun LauncherGateScreen(onSelectAdmin: () -> Unit, onSelectUser: () -> Unit) {
             )
 
             Card(
-                onClick = onSelectAdmin,
+                onClick = { showAdminDialog = true },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 8.dp)
@@ -284,7 +386,7 @@ fun LauncherGateScreen(onSelectAdmin: () -> Unit, onSelectUser: () -> Unit) {
                             color = MaterialTheme.colorScheme.primary
                         )
                         Text(
-                            "تسجيل الدخول، عرض قائمة الأجهزة وسلسلة المواقع، إرسال الأوامر والاطلاع على لقطات الشاشة والصوت المسترجع.",
+                            "تسجيل الدخول، عرض قائمة الأجهزة وسلسلة المواقع، إرسال الأوامر والاطلاع على لقطات الشاشة والصوت المسترجع الفوري.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -293,7 +395,7 @@ fun LauncherGateScreen(onSelectAdmin: () -> Unit, onSelectUser: () -> Unit) {
             }
 
             Card(
-                onClick = onSelectUser,
+                onClick = { showUserDialog = true },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 8.dp)
@@ -356,7 +458,7 @@ fun LauncherGateScreen(onSelectAdmin: () -> Unit, onSelectUser: () -> Unit) {
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        "يعمل التطبيق بمحاكاة ذاتية متزامنة تتيح تجربة دورين معاً في نفس الوقت على المحاكي دون تطلب تهيئة سيرفر خارجي.",
+                        "تستطيع إعادة ضبط خيار تثبيت الجهاز وإظهار الشاشة المزدوجة من جديد عبر النقر على زر إعادة الضبط في شريط العنوان العلوى.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSecondaryContainer
                     )
@@ -484,6 +586,7 @@ fun LoginScreen(navController: NavController) {
 fun AdminDashboard(navController: NavController) {
     val devices by SyncEngine.devices.collectAsState()
     val localContext = LocalContext.current
+    var selectedTab by remember { mutableStateOf(0) } // 0 = الأجهزة المتصلة, 1 = إدارة حزمة العميل (APK)
 
     Scaffold(
         topBar = {
@@ -503,6 +606,14 @@ fun AdminDashboard(navController: NavController) {
                     }) {
                         Icon(Icons.Default.Refresh, contentDescription = "تحديث الأجهزة المتصلة")
                     }
+                    if (AppConfig.BUILD_ROLE == AppConfig.ROLE_DUAL && AppPreferences.getSavedRole(localContext) != null) {
+                        IconButton(onClick = {
+                            AppPreferences.clearSavedRole(localContext)
+                            Toast.makeText(localContext, "تم إعادة تعيين دور الجهاز. يرجى إعادة تشغيل التطبيق.", Toast.LENGTH_LONG).show()
+                        }) {
+                            Icon(Icons.Default.Logout, contentDescription = "إعادة ضبط اختيار الدور")
+                        }
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -517,141 +628,741 @@ fun AdminDashboard(navController: NavController) {
                 .padding(paddingValues)
                 .padding(16.dp)
         ) {
-            Text(
-                "الأجهزة المتصلة بالمنظومة (${devices.size}):",
-                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                color = MaterialTheme.colorScheme.onBackground
-            )
-
-            Spacer(Modifier.height(12.dp))
-
-            if (devices.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentAlignment = Alignment.Center
+            // شريط التنقل العلوي المخصص للأقسام (Custom M3 Tabs)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp)
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), RoundedCornerShape(24.dp))
+                    .padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Surface(
+                    onClick = { selectedTab = 0 },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(20.dp),
+                    color = if (selectedTab == 0) MaterialTheme.colorScheme.primary else Color.Transparent,
+                    contentColor = if (selectedTab == 0) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            Icons.Default.Devices,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.outline,
-                            modifier = Modifier.size(64.dp)
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            "لا توجد أجهزة متصلة في الوقت الحالي\n(قم بتشغيل جهاز العميل للتوصيل الفوري)",
-                            textAlign = TextAlign.Center,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    Box(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Devices, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("الأجهزة والتحكم", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                        }
                     }
                 }
-            } else {
-                LazyColumn(
+
+                Surface(
+                    onClick = { selectedTab = 1 },
                     modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    shape = RoundedCornerShape(20.dp),
+                    color = if (selectedTab == 1) MaterialTheme.colorScheme.primary else Color.Transparent,
+                    contentColor = if (selectedTab == 1) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
                 ) {
-                    items(devices) { device ->
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("device_card_${device.deviceId}"),
-                            shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(
-                                width = 1.dp,
-                                color = if (device.isOnline) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
-                                else MaterialTheme.colorScheme.outlineVariant
-                            ),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    Box(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("مشاركة العميل (APK)", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                }
+            }
+
+            if (selectedTab == 0) {
+                // القسم الأول: الأجهزة المتصلة بالمنظومة للتحكم الفوري
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "الأجهزة المتصلة بالمنظومة (${devices.size}):",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onBackground,
+                        modifier = Modifier.weight(1f)
+                    )
+                    
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (SyncEngine.isFirebaseActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.errorContainer,
+                        modifier = Modifier.padding(start = 8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(modifier = Modifier.padding(16.dp)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(12.dp)
-                                            .clip(CircleShape)
-                                            .background(if (device.isOnline) Color(0xFF4CAF50) else Color(0xFFF44336))
-                                    )
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(
-                                        text = device.deviceName,
-                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Surface(
-                                        shape = RoundedCornerShape(8.dp),
-                                        color = if (device.isOnline) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(if (SyncEngine.isFirebaseActive) Color(0xFF4CAF50) else Color(0xFFFF9800))
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = if (SyncEngine.isFirebaseActive) "سيرفر نشط" else "محاكاة محلية",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (SyncEngine.isFirebaseActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                if (devices.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                Icons.Default.Devices,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.outline,
+                                modifier = Modifier.size(64.dp)
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "لا توجد أجهزة متصلة في الوقت الحالي\n(قم بتشغيل جهاز العميل للتوصيل الفوري)",
+                                textAlign = TextAlign.Center,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(devices) { device ->
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("device_card_${device.deviceId}"),
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(
+                                    width = 1.dp,
+                                    color = if (device.isOnline) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                                    else MaterialTheme.colorScheme.outlineVariant
+                                ),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                            ) {
+                                Column(modifier = Modifier.padding(16.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth()
                                     ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(12.dp)
+                                                .clip(CircleShape)
+                                                .background(if (device.isOnline) Color(0xFF4CAF50) else Color(0xFFF44336))
+                                        )
+                                        Spacer(Modifier.width(8.dp))
                                         Text(
-                                            text = if (device.isOnline) "نشط" else "غير متصل",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = if (device.isOnline) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                            text = device.deviceName,
+                                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = if (device.isOnline) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+                                        ) {
+                                            Text(
+                                                text = if (device.isOnline) "نشط" else "غير متصل",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = if (device.isOnline) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                            )
+                                        }
+                                    }
+
+                                    Spacer(Modifier.height(8.dp))
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                                    Spacer(Modifier.height(8.dp))
+
+                                    Text(
+                                        text = "مُعرف الجهاز: ${device.deviceId}",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    val date = SimpleDateFormat("yyyy-MM-dd hh:mm a", Locale.getDefault()).format(Date(device.lastSeen))
+                                    if (device.lastCommand.isNotEmpty()) {
+                                        Spacer(Modifier.height(8.dp))
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f),
+                                            shape = RoundedCornerShape(8.dp),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(10.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Info,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.tertiary,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                                Spacer(Modifier.width(8.dp))
+                                                Column {
+                                                    Text(
+                                                        text = "آخر أمر منفذ: ${device.lastCommand}",
+                                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                                                    )
+                                                    if (device.lastCommandTime > 0) {
+                                                        val cmdTimeStr = SimpleDateFormat("hh:mm:ss a", Locale.getDefault()).format(Date(device.lastCommandTime))
+                                                        Text(
+                                                            text = "وقت الإرسال: $cmdTimeStr",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Spacer(Modifier.height(12.dp))
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                                    Spacer(Modifier.height(12.dp))
+
+                                    Text(
+                                        text = "لوحة التحكم السريع بالأوامر:",
+                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+
+                                    Spacer(Modifier.height(8.dp))
+
+                                    var cmdText by remember(device.deviceId) { mutableStateOf("") }
+
+                                    OutlinedTextField(
+                                        value = cmdText,
+                                        onValueChange = { cmdText = it },
+                                        placeholder = { Text("أدخل أمراً مخصصاً أو رسالة للعميل...") },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("device_custom_cmd_input_${device.deviceId}"),
+                                        shape = RoundedCornerShape(12.dp),
+                                        singleLine = true,
+                                        trailingIcon = {
+                                            if (cmdText.isNotEmpty()) {
+                                                IconButton(onClick = { cmdText = "" }) {
+                                                    Icon(Icons.Default.Clear, contentDescription = "مسح")
+                                                }
+                                            }
+                                        },
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                            unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant
+                                        )
+                                    )
+
+                                    Spacer(Modifier.height(8.dp))
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        AssistChip(
+                                            onClick = {
+                                                val command = if (cmdText.isNotBlank()) "إعادة تشغيل: $cmdText" else "إعادة تشغيل"
+                                                SyncEngine.sendCommand(device.deviceId, command)
+                                                Toast.makeText(localContext, "تم إرسال أمر إعادة التشغيل", Toast.LENGTH_SHORT).show()
+                                                cmdText = ""
+                                            },
+                                            label = { Text("إعادة تشغيل", fontWeight = FontWeight.Bold, fontSize = 11.sp) },
+                                            leadingIcon = {
+                                                Icon(
+                                                    Icons.Default.Sync,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            },
+                                            colors = AssistChipDefaults.assistChipColors(
+                                                leadingIconContentColor = MaterialTheme.colorScheme.error,
+                                                labelColor = MaterialTheme.colorScheme.onSurface
+                                            ),
+                                            modifier = Modifier.weight(1f).testTag("reboot_btn_${device.deviceId}")
+                                        )
+
+                                        AssistChip(
+                                            onClick = {
+                                                val command = if (cmdText.isNotBlank()) "قفل الشاشة: $cmdText" else "قفل الشاشة"
+                                                SyncEngine.sendCommand(device.deviceId, command)
+                                                Toast.makeText(localContext, "تم إرسال أمر قفل الشاشة", Toast.LENGTH_SHORT).show()
+                                                cmdText = ""
+                                            },
+                                            label = { Text("قفل الشاشة", fontWeight = FontWeight.Bold, fontSize = 11.sp) },
+                                            leadingIcon = {
+                                                Icon(
+                                                    Icons.Default.Lock,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            },
+                                            colors = AssistChipDefaults.assistChipColors(
+                                                leadingIconContentColor = MaterialTheme.colorScheme.primary,
+                                                labelColor = MaterialTheme.colorScheme.onSurface
+                                            ),
+                                            modifier = Modifier.weight(1f).testTag("lock_btn_${device.deviceId}")
+                                        )
+
+                                        AssistChip(
+                                            onClick = {
+                                                val command = if (cmdText.isNotBlank()) "أرسل رسالة: $cmdText" else "أرسل رسالة: مرحباً"
+                                                SyncEngine.sendCommand(device.deviceId, command)
+                                                Toast.makeText(localContext, "تم إرسال الرسالة للعميل", Toast.LENGTH_SHORT).show()
+                                                cmdText = ""
+                                            },
+                                            label = { Text("رسالة", fontWeight = FontWeight.Bold, fontSize = 11.sp) },
+                                            leadingIcon = {
+                                                Icon(
+                                                    Icons.Default.Send,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            },
+                                            colors = AssistChipDefaults.assistChipColors(
+                                                leadingIconContentColor = MaterialTheme.colorScheme.tertiary,
+                                                labelColor = MaterialTheme.colorScheme.onSurface
+                                            ),
+                                            modifier = Modifier.weight(1f).testTag("send_msg_btn_${device.deviceId}")
                                         )
                                     }
-                                }
 
-                                Spacer(Modifier.height(8.dp))
-                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                                Spacer(Modifier.height(8.dp))
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        text = "آخر ظهور: $date",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
 
-                                Text(
-                                    text = "مُعرف الجهاز: ${device.deviceId}",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                    Spacer(Modifier.height(16.dp))
 
-                                val date = SimpleDateFormat("yyyy-MM-dd hh:mm a", Locale.getDefault()).format(Date(device.lastSeen))
-                                Text(
-                                    text = "آخر ظهور: $date",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-
-                                Spacer(Modifier.height(16.dp))
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.End
-                                ) {
-                                    OutlinedButton(
-                                        onClick = {
-                                            SyncEngine.sendCommand(device.deviceId, "عرض الموقع")
-                                            Toast.makeText(localContext, "تم طلب إحداثيات GPS", Toast.LENGTH_SHORT).show()
-                                        },
-                                        shape = RoundedCornerShape(8.dp),
-                                        modifier = Modifier.padding(end = 8.dp)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.End
                                     ) {
-                                        Icon(Icons.Default.LocationOn, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Spacer(Modifier.width(4.dp))
-                                        Text("موقع سريع")
-                                    }
+                                        OutlinedButton(
+                                            onClick = {
+                                                SyncEngine.sendCommand(device.deviceId, "عرض الموقع")
+                                                Toast.makeText(localContext, "تم طلب إحداثيات GPS", Toast.LENGTH_SHORT).show()
+                                            },
+                                            shape = RoundedCornerShape(8.dp),
+                                            modifier = Modifier.padding(end = 8.dp)
+                                        ) {
+                                            Icon(Icons.Default.LocationOn, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("موقع سريع")
+                                        }
 
-                                    Button(
-                                        onClick = {
-                                            navController.navigate("device_control/${device.deviceId}")
-                                        },
-                                        shape = RoundedCornerShape(8.dp)
-                                    ) {
-                                        Icon(Icons.Default.SettingsRemote, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Spacer(Modifier.width(4.dp))
-                                        Text("التحكم الكامل")
+                                        Button(
+                                            onClick = {
+                                                navController.navigate("device_control/${device.deviceId}")
+                                            },
+                                            shape = RoundedCornerShape(8.dp)
+                                        ) {
+                                            Icon(Icons.Default.SettingsRemote, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("التحكم الكامل")
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
+            } else {
+                // القسم الثاني: إدارة ومشاركة حزمة تطبيق العميل المؤمنة (Client APK)
+                ClientApkTabContent(localContext)
             }
         }
+    }
+}
+
+/**
+ * محتوى قسم إدارة حزمة العميل (Client APK) - تشفير، ومشاركة، وتنزيل، وتحديث
+ */
+@Composable
+fun ClientApkTabContent(localContext: Context) {
+    var apkDetails by remember { mutableStateOf(ClientApkManager.getActiveApkDetails(localContext)) }
+    var showExtractionProgress by remember { mutableStateOf(false) }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            val success = ClientApkManager.upgradeClientApk(localContext, uri)
+            if (success) {
+                apkDetails = ClientApkManager.getActiveApkDetails(localContext)
+                Toast.makeText(localContext, "تم تحديث حزمة العميل وتشفيرها بنجاح!", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(localContext, "خطأ: فشل قراءة أو تعمية حزمة APK المرفوعة", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val writePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            ClientApkManager.saveClientApkToDownloads(
+                context = localContext,
+                onProgressChange = { showExtractionProgress = it },
+                onSuccess = { msg -> Toast.makeText(localContext, msg, Toast.LENGTH_LONG).show() },
+                onError = { err -> Toast.makeText(localContext, err, Toast.LENGTH_LONG).show() }
+            )
+        } else {
+            Toast.makeText(localContext, "خطأ: يجب منح صلاحية التخزين لتصدير حزمة التطبيق للجهاز", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // 1. بطاقة الأمان التشفيري
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
+                ),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.15f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Security,
+                        contentDescription = "أمان الحزمة",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(44.dp)
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "حاوية مدمجة محمية بتشفير ثنائي",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "ملف تطبيق العميل مخزن بحماية تعمية XOR متماثلة لضمان عدم استخراج الحزمة بطرق ملتوية. فك التشفير والمصادقة الأمنية لسلامة البيانات تجري بشكل فوري عند التصدير والمشاركة.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            // 2. بطاقة المواصفات التعريفية للـ APK الكامن
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "مواصفات وفحوصات حزمة العميل (APK):",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.padding(bottom = 12.dp))
+
+                    MetadataItem(
+                        label = "رقم إصدار تطبيق العميل:",
+                        value = apkDetails.versionName,
+                        icon = Icons.Default.Info,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    MetadataItem(
+                        label = "حجم الحزمة المشفرة:",
+                        value = apkDetails.sizeFormatted,
+                        icon = Icons.Default.Folder,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+
+                    MetadataItem(
+                        label = "تاريخ آخر تعديل وتحديث:",
+                        value = apkDetails.lastUpdated,
+                        icon = Icons.Default.History,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+
+                    MetadataItem(
+                        label = "مصدر حزمة تطبيق العميل:",
+                        value = apkDetails.source,
+                        icon = Icons.Default.CheckCircle,
+                        color = if (apkDetails.source.contains("افتراضي")) MaterialTheme.colorScheme.outline else Color(0xFF4CAF50)
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+                    
+                    // بصمة SHA-256 للمصادقة والسلامة البرمجية
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Lock,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "بصمة التحقق والسلامة (SHA-256 Hash):",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = apkDetails.sha256,
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 3. أزرار المشاركة والتصدير الشاملة
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "خيارات تصدير ومشاركة الحاوية:",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
+
+                    Button(
+                        onClick = {
+                            ClientApkManager.shareClientApk(
+                                context = localContext,
+                                onProgressChange = { showExtractionProgress = it },
+                                onError = { err -> Toast.makeText(localContext, err, Toast.LENGTH_LONG).show() }
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Share, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("مشاركة حزمة تطبيق العميل والبدء بالمراقبة", fontWeight = FontWeight.Bold)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ||
+                                ContextCompat.checkSelfPermission(localContext, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
+                                ClientApkManager.saveClientApkToDownloads(
+                                    context = localContext,
+                                    onProgressChange = { showExtractionProgress = it },
+                                    onSuccess = { msg -> Toast.makeText(localContext, msg, Toast.LENGTH_LONG).show() },
+                                    onError = { err -> Toast.makeText(localContext, err, Toast.LENGTH_LONG).show() }
+                                )
+                            } else {
+                                writePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.secondary),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f))
+                    ) {
+                        Icon(imageVector = Icons.Default.Download, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("تصدير وحفظ ملف APK في مجلد التنزيلات", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            // 4. ترقية واستبدال تطبيق العميل
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.15f)),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "ترقية واستبدال حزمة العميل (تحديث البرنامج):",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "يتيح لك هذا القسم كمسؤول رفع وتضمين أي حزمة APK أخرى كبديل لتطبيق العميل تلقائياً. سيقوم النظام بتحليل بنية الحزمة، حساب بصمة حمايتها ومن ثم تشفيرها وحفظها في مساحة الحساب المشفرة.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                filePickerLauncher.launch("application/vnd.android.package-archive")
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                        ) {
+                            Icon(imageVector = Icons.Default.Upload, contentDescription = null)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("رفع وتحديث ملف APK", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        if (ClientApkManager.hasCustomApk(localContext)) {
+                            OutlinedButton(
+                                onClick = {
+                                    val success = ClientApkManager.restoreDefaultApk(localContext)
+                                    if (success) {
+                                        apkDetails = ClientApkManager.getActiveApkDetails(localContext)
+                                        Toast.makeText(localContext, "تم استعادة الحزمة المدمجة الافتراضية بنجاح!", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error)
+                            ) {
+                                Icon(imageVector = Icons.Default.Delete, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("حذف وبدء الافتراضي", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. نافذة استخراج التقدم الدائري (Glassmorphic Safe Extraction Dialog Overlay)
+        if (showExtractionProgress) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .clickable(enabled = false) {},
+                contentAlignment = Alignment.Center
+            ) {
+                Card(
+                    modifier = Modifier
+                        .width(290.dp)
+                        .padding(16.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 10.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        CircularProgressIndicator(
+                            color = MaterialTheme.colorScheme.primary,
+                            strokeWidth = 4.dp
+                        )
+                        Spacer(modifier = Modifier.height(20.dp))
+                        Text(
+                            text = "جاري فتح الأمان والاستخراج المؤقت الحماية التشفيرية...",
+                            textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "مصادقة سلامة الحزمة SHA-256 نشطة",
+                            textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * دالة فرعية مساعدة لعرض كرت يحتوي على معلومات التفاصيل لبيانات الحزمة
+ */
+@Composable
+fun MetadataItem(
+    label: String,
+    value: String,
+    icon: ImageVector,
+    color: Color
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = color,
+            modifier = Modifier.size(20.dp)
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1.3f)
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1.7f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -664,14 +1375,27 @@ fun DeviceControlScreen(deviceId: String, navController: NavController) {
     val locationsMap by SyncEngine.locations.collectAsState()
     val recordingsMap by SyncEngine.recordings.collectAsState()
     val cameraSnipsMap by SyncEngine.cameraSnips.collectAsState()
+    val chatMessagesMap by SyncEngine.chatMessages.collectAsState()
 
     val currentCommands = commandsMap[deviceId] ?: emptyList()
     val screenshots = screenshotsMap[deviceId] ?: emptyList()
     val locations = locationsMap[deviceId] ?: emptyList()
     val recordings = recordingsMap[deviceId] ?: emptyList()
     val cameraSnips = cameraSnipsMap[deviceId] ?: emptyList()
+    val chatMessages = chatMessagesMap[deviceId] ?: emptyList()
 
-    var activeTab by remember { mutableIntStateOf(0) } // 0: Commands, 1: Screenshots, 2: Camera Snaps, 3: Audio Clips, 4: GPS Locations
+    var activeTab by remember { mutableIntStateOf(0) } // 0: Chat, 1: Commands, 2: Screenshots, 3: Camera Snaps, 4: Audio Clips, 5: GPS Locations
+
+    // Bi-directional real-time Firebase subscription with auto-cleaning
+    var forceRefresh by remember { mutableIntStateOf(0) }
+    DisposableEffect(deviceId) {
+        val observerList = SyncEngine.startRealtimeDeviceObserver(deviceId) {
+            forceRefresh++
+        }
+        onDispose {
+            observerList.forEach { it.remove() }
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -740,18 +1464,21 @@ fun DeviceControlScreen(deviceId: String, navController: NavController) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Tab(selected = activeTab == 0, onClick = { activeTab = 0 }) {
-                    Text("سجل الأوامر", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
+                    Text("الدردشة الفورية (${chatMessages.size})", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
                 }
                 Tab(selected = activeTab == 1, onClick = { activeTab = 1 }) {
-                    Text("لقطات الشاشة (${screenshots.size})", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
+                    Text("سجل الأوامر", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
                 }
                 Tab(selected = activeTab == 2, onClick = { activeTab = 2 }) {
-                    Text("لقطات الكاميرا (${cameraSnips.size})", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
+                    Text("لقطات الشاشة (${screenshots.size})", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
                 }
                 Tab(selected = activeTab == 3, onClick = { activeTab = 3 }) {
-                    Text("التسجيلات الصوتية (${recordings.size})", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
+                    Text("لقطات الكاميرا (${cameraSnips.size})", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
                 }
                 Tab(selected = activeTab == 4, onClick = { activeTab = 4 }) {
+                    Text("التسجيلات الصوتية (${recordings.size})", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
+                }
+                Tab(selected = activeTab == 5, onClick = { activeTab = 5 }) {
                     Text("المواقع الجغرافية (${locations.size})", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
                 }
             }
@@ -764,12 +1491,158 @@ fun DeviceControlScreen(deviceId: String, navController: NavController) {
                     .padding(12.dp)
             ) {
                 when (activeTab) {
-                    0 -> CommandLogSubTab(currentCommands)
-                    1 -> ScreenshotSubTab(screenshots)
-                    2 -> CameraSnipSubTab(cameraSnips)
-                    3 -> AudioRecordingSubTab(recordings)
-                    4 -> LocationSubTab(locations)
+                    0 -> ChatSubTab(deviceId, chatMessages)
+                    1 -> CommandLogSubTab(currentCommands)
+                    2 -> ScreenshotSubTab(screenshots)
+                    3 -> CameraSnipSubTab(cameraSnips)
+                    4 -> AudioRecordingSubTab(recordings)
+                    5 -> LocationSubTab(locations)
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun ChatSubTab(deviceId: String, messages: List<ChatMessageModel>) {
+    val context = LocalContext.current
+    var textState by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+
+    // Scroll to bottom when a new message arrives
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)),
+            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.Forum,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "تواصل فوري ثنائي الاتجاه مع العميل. يمكنك إرسال الرسائل ومتابعتها في نفس الوقت من شاشة العميل.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(vertical = 8.dp)
+        ) {
+            if (messages.isEmpty()) {
+                item {
+                    Box(
+                        modifier = Modifier.fillParentMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "لا توجد رسائل محادثة بعد.\nاكتب رسالة في الأسفل للتواصل الفوري مع العميل.",
+                            textAlign = TextAlign.Center,
+                            color = Color.Gray,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                }
+            } else {
+                items(messages) { msg ->
+                    val isAdmin = msg.sender == "admin"
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = if (isAdmin) Arrangement.End else Arrangement.Start
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(
+                                topStart = 12.dp,
+                                topEnd = 12.dp,
+                                bottomStart = if (isAdmin) 12.dp else 0.dp,
+                                bottomEnd = if (isAdmin) 0.dp else 12.dp
+                            ),
+                            color = if (isAdmin) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer,
+                            modifier = Modifier
+                                .widthIn(max = 280.dp)
+                                .padding(horizontal = 4.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text(
+                                    text = msg.text,
+                                    color = if (isAdmin) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer,
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                val timeStr = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(msg.timestamp))
+                                Text(
+                                    text = timeStr,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = (if (isAdmin) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer).copy(alpha = 0.6f),
+                                    modifier = Modifier.align(Alignment.End)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedTextField(
+                value = textState,
+                onValueChange = { textState = it },
+                placeholder = { Text("اكتب رسالة...") },
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("chat_input_text"),
+                shape = RoundedCornerShape(24.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outline
+                ),
+                singleLine = true
+            )
+
+            IconButton(
+                onClick = {
+                    if (textState.isNotBlank()) {
+                        SyncEngine.sendChatMessage(context, deviceId, "admin", textState)
+                        textState = ""
+                    }
+                },
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary)
+                    .testTag("chat_send_button")
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "إرسال",
+                    tint = MaterialTheme.colorScheme.onPrimary
+                )
             }
         }
     }
@@ -846,37 +1719,73 @@ fun CommandLogSubTab(commands: List<CommandModel>) {
 
 @Composable
 fun ScreenshotSubTab(screenshots: List<ScreenshotModel>) {
+    var selectedUrl by remember { mutableStateOf<String?>(null) }
+
     if (screenshots.isEmpty()) {
         EmptyLogsView(message = "لا توجد لقطات شاشة تم استلامها بعد\n(أرسل أمر لقطة الشاشة ليتم المحاكاة فورياً)")
     } else {
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            items(screenshots) { item ->
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Column {
-                        AsyncImage(
-                            model = item.url,
-                            contentDescription = "لقطة الشاشة المسترجعة",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(160.dp)
-                        )
-                        val date = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(item.timestamp))
-                        Text(
-                            "تم التقاطها: $date",
-                            modifier = Modifier.padding(8.dp),
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Bold
-                        )
+        Box(modifier = Modifier.fillMaxSize()) {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(screenshots) { item ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { selectedUrl = item.url }
+                            .testTag("screenshot_item_${item.id}"),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Column {
+                            AsyncImage(
+                                model = item.url,
+                                contentDescription = "لقطة الشاشة المسترجعة",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(160.dp)
+                            )
+                            val date = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(item.timestamp))
+                            Text(
+                                "تم التقاطها: $date",
+                                modifier = Modifier.padding(8.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
+            }
+
+            // Expanded Fullscreen Dialog for user-friendly format screenshot presentation!
+            selectedUrl?.let { url ->
+                AlertDialog(
+                    onDismissRequest = { selectedUrl = null },
+                    confirmButton = {
+                        TextButton(onClick = { selectedUrl = null }) {
+                            Text("إغلاق")
+                        }
+                    },
+                    title = { Text("معاينة لقطة الشاشة", fontWeight = FontWeight.Bold) },
+                    text = {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(380.dp)
+                                .clip(RoundedCornerShape(8.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            AsyncImage(
+                                model = url,
+                                contentDescription = "معاينة كاملة",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
+                )
             }
         }
     }
@@ -978,6 +1887,7 @@ fun AudioRecordingSubTab(recordings: List<RecordingModel>) {
 
 @Composable
 fun LocationSubTab(locations: List<LocationModel>) {
+    val context = LocalContext.current
     if (locations.isEmpty()) {
         EmptyLogsView(message = "لا توجد قراءات لتاريخ الإحداثيات")
     } else {
@@ -1011,9 +1921,20 @@ fun LocationSubTab(locations: List<LocationModel>) {
                         }
 
                         IconButton(onClick = {
-                            // Simulation showing maps details
+                            try {
+                                val gmmIntentUri = Uri.parse("geo:${loc.latitude},${loc.longitude}?q=${loc.latitude},${loc.longitude}(موقع جهاز العميل)")
+                                val mapIntent = Intent(Intent.ACTION_VIEW, gmmIntentUri)
+                                context.startActivity(mapIntent)
+                            } catch (e: Exception) {
+                                try {
+                                    val webMapIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/maps/search/?api=1&query=${loc.latitude},${loc.longitude}"))
+                                    context.startActivity(webMapIntent)
+                                } catch (err: Exception) {
+                                    Toast.makeText(context, "لا توجد تطبيقات لفتح الخرائط", Toast.LENGTH_SHORT).show()
+                                }
+                            }
                         }) {
-                            Icon(Icons.Default.Map, contentDescription = "خرائط")
+                            Icon(Icons.Default.Map, contentDescription = "خرائط", tint = MaterialTheme.colorScheme.primary)
                         }
                     }
                 }
@@ -1092,6 +2013,16 @@ fun UserAgentScreen(
         topBar = {
             TopAppBar(
                 title = { Text("عميل المراقبة والمتابعة عن بعد", fontWeight = FontWeight.Bold) },
+                actions = {
+                    if (AppConfig.BUILD_ROLE == AppConfig.ROLE_DUAL && AppPreferences.getSavedRole(context) != null) {
+                        IconButton(onClick = {
+                            AppPreferences.clearSavedRole(context)
+                            Toast.makeText(context, "تم إعادة تعيين دور الجهاز. يرجى إعادة تشغيل التطبيق.", Toast.LENGTH_LONG).show()
+                        }) {
+                            Icon(Icons.Default.Logout, contentDescription = "إعادة ضبط اختيار الدور")
+                        }
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.tertiaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.onTertiaryContainer
@@ -1165,6 +2096,125 @@ fun UserAgentScreen(
                             Icon(Icons.Default.Stop, contentDescription = null)
                             Spacer(Modifier.width(4.dp))
                             Text("إيقاف الخدمة", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+
+            // Live Chat with Admin panel
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.3f))
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.Chat,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "محادثة مباشرة مع لوحة التحكم",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+
+                    val deviceId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: "emu_pixel_8"
+                    val chatMessagesMap by SyncEngine.chatMessages.collectAsState()
+                    val chatMessages = chatMessagesMap[deviceId] ?: emptyList()
+
+                    // Box showing messages
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(150.dp)
+                            .background(MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(8.dp))
+                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, shape = RoundedCornerShape(8.dp))
+                            .padding(8.dp)
+                    ) {
+                        if (chatMessages.isEmpty()) {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text("لا توجد رسائل نشطة مع المسؤول.", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                            }
+                        } else {
+                            val listState = rememberLazyListState()
+                            LaunchedEffect(chatMessages.size) {
+                                listState.animateScrollToItem(chatMessages.size - 1)
+                            }
+                            LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                items(chatMessages) { msg ->
+                                    val isMe = msg.sender == "device"
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalAlignment = if (isMe) Alignment.End else Alignment.Start
+                                    ) {
+                                        Surface(
+                                            color = if (isMe) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                            shape = RoundedCornerShape(8.dp),
+                                            modifier = Modifier.widthIn(max = 220.dp)
+                                        ) {
+                                            Text(
+                                                text = msg.text,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                modifier = Modifier.padding(6.dp),
+                                                color = if (isMe) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Spacer(Modifier.height(2.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    var agentInputText by remember { mutableStateOf("") }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = agentInputText,
+                            onValueChange = { agentInputText = it },
+                            placeholder = { Text("أجب المشرف...", fontSize = 12.sp) },
+                            modifier = Modifier.weight(1f).testTag("agent_chat_input"),
+                            shape = RoundedCornerShape(20.dp),
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant
+                            )
+                        )
+
+                        IconButton(
+                            onClick = {
+                                if (agentInputText.isNotBlank()) {
+                                    SyncEngine.sendChatMessage(context, deviceId, "device", agentInputText)
+                                    agentInputText = ""
+                                }
+                            },
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary)
+                                .testTag("agent_chat_send"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Send,
+                                contentDescription = "إرسال",
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(18.dp)
+                            )
                         }
                     }
                 }

@@ -57,6 +57,11 @@ class UserForegroundService : Service() {
 
         // Register in Firebase if configuration is alive
         SyncEngine.checkFirebase(this)
+        
+        // Auto register the device to make it discoverable to the admin panel immediately (Local and Firebase)
+        val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "device_id"
+        SyncEngine.registerDevice(this, "auto_token_$deviceId")
+        
         listenToFirebaseCommands()
 
         return START_STICKY
